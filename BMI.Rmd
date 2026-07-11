@@ -1,0 +1,1762 @@
+---
+title: "Modelo 3"
+author: "Sebastian A Gutierrez-Romero"
+date: "2026-01-23"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(readxl)
+library(dplyr) 
+library(ggplot2) 
+library(lme4)
+library(lmerTest)
+library(lmtest)
+library(performance) 
+library(WeMix)
+library(ggeffects)
+library(survey)
+library(tidyr)
+library(knitr)
+library(car)
+library(describedata)
+library(modelsummary)
+library(ggrepel)
+library(stringr)
+library(gt)
+library(forcats)
+library(purrr)
+
+
+BOGOTA <- read_excel("COPEN_BOGOTA_DATA_FINAL.xlsx")
+BARRANQUILLA <- read_excel("COPEN_BARRANQUILLA_DATA_FINAL.xlsx")
+MEDELLIN <- read_excel("COPEN_MEDELLIN_DATA_FINAL.xlsx")
+CALI <- read_excel("COPEN_CALI_DATA_FINAL.xlsx")
+BUCARAMANGA <- read_excel("COPEN_BUCARAMANGA_DATA_FINAL.xlsx")
+
+# Creo los grupos de variables
+
+vars_character <- c(
+  "ID", "ID_SECTOR", "ID_SECTION", "ID_MZN", "ID_SUBURB",
+  "SUBURB_NAME", "BUFFER_ID50", "BUFFER_ID60", "BUFFER_ID70",
+  "BUFFER_ID80", "BUFFER_ID90", "BUFFER_ID95",
+  "COUNTRY", "CITY_CODE", "ADDRESS_1", "SUBURB",
+  "ADDRESS_2", "FULL_ADDRESS", "RECORD"
+)
+
+vars_factor <- c(
+  "CITY_NAME", "SEX", "SOC_ECON_LEVEL", "JOB",
+  "EDU_LEVEL", "MARITAL_STATUS",
+  "PREGNANCY", "DIABETES_PREV"
+)
+
+vars_numeric <- c(
+  "EXP_FACTOR", "LATITUDE", "LONGITUDE", "AGE",
+  "HEIGHT", "WEIGHT", "WAIST_CIRCUNF",
+  "AREA_KM2", "INT_TOPOL_BY_KM2", "INT_WALK_BY_KM2",
+  "DIST_STOPS_MIN", "DIST_STOPS_MAX", "DIST_STOPS_MEDIAN",
+  "DIST_STOPS_Q1", "DIST_STOPS_Q3", "DIST_STOPS_IQR",
+  "DIST_STOPS_MEAN", "DIST_STOPS_STDEV",
+  "NDVI_MEAN", "NDVI_MEDIAN", "NDVI_STDEV",
+  "NDVI_MIN", "NDVI_MAX", "NDVI_VAR",
+  "GREEN_PERC", "GREEN_AREA_M2",
+  "DENS_SUPERMARKET", "DENS_GREENGROCER",
+  "DENS_MARKETPLACE", "DENS_HEALTH_MARKET",
+  "DENS_FAST_TOTAL", "DENS_BAKERY_TOTAL",
+  "DENS_UNHEALTH_MARKET",
+  "SURVEY_LONG", "SURVEY_LAT", "GLUCOSE"
+)
+
+vars_integer <- c(
+  "INT_TOPOL_BY_BUFFER", "INT_WALK_BY_BUFFER",
+  "N_SUPERMARKET", "N_GREENGROCER", "N_CONVENIENCE",
+  "N_MARKETPLACE", "N_HEALTH_MARKET",
+  "N_FAST", "N_REST_FF", "N_FOODCOURT",
+  "N_FAST_TOTAL", "N_BAKERY", "N_PASTRY",
+  "N_CONFECTIONERY", "N_CAFE", "N_ICE",
+  "N_BAKERY_TOTAL", "N_UNHEALTH_MARKET",
+  "PEOPLE_AT_HOME"
+)
+
+# Función para especificar la clase de la variable en cada base de datos
+
+estandarizar_base <- function(df) {
+
+  df %>%
+    mutate(
+      across(any_of(vars_character), as.character),
+      across(any_of(vars_factor), ~ factor(.)),
+      across(any_of(vars_numeric), as.numeric),
+      across(any_of(vars_integer), ~ as.integer(round(.)))
+    )
+
+}
+
+# Aplicar la función en cada base
+
+bogota <- estandarizar_base(BOGOTA)
+medellin <- estandarizar_base(MEDELLIN)
+cali <- estandarizar_base(CALI)
+bucaramanga <- estandarizar_base(BUCARAMANGA)
+barranquilla <- estandarizar_base(BARRANQUILLA)
+
+
+bases <- list(
+  bogota = bogota,
+  medellin = medellin,
+  cali = cali,
+  bucaramanga = bucaramanga,
+  barranquilla = barranquilla
+)
+
+base_total <- bind_rows(
+  bogota,
+  medellin,
+  cali,
+  bucaramanga,
+  barranquilla
+)
+
+base_total <- base_total %>%
+  rename(WC = WAIST_CIRCUNF)
+
+base_total <- base_total %>%
+  mutate(
+    # 1) AGE_GROUP
+    AGE_GROUP = case_when(
+      AGE < 18 ~ 0,
+      AGE >= 18 & AGE <= 39 ~ 1,
+      AGE >= 40 & AGE <= 59 ~ 2,
+      AGE >= 60 & AGE <= 80 ~ 3,
+      TRUE ~ NA_real_
+    ),
+    AGE_GROUP = factor(
+      AGE_GROUP,
+      levels = c(0, 1, 2, 3),
+      labels = c("Menor de 18 años", "18-39 años", "40-59 años", "60-80 años")
+    ),
+
+    # 2) EDU_GROUP 
+    EDU_GROUP = case_when(
+      EDU_LEVEL %in% c(1, 2) ~ 1,       # Primaria o menos
+      EDU_LEVEL %in% c(3, 4) ~ 2,       # Secundaria o técnico
+      EDU_LEVEL %in% c(5, 6) ~ 3,       # Profesional o mayor
+      TRUE ~ NA_real_
+    ),
+    EDU_GROUP = factor(
+      EDU_GROUP,
+      levels = c(1, 2, 3),
+      labels = c("Primaria o menos", "Secundaria o técnico", "Profesional o mayor")
+    ),
+
+    # 3) SEL_GROUP (basado en SOC_ECON_LEVEL: 1-6)
+    SEL_GROUP = case_when(
+      SOC_ECON_LEVEL %in% c(1, 2) ~ 1,
+      SOC_ECON_LEVEL == 3 ~ 2,
+      SOC_ECON_LEVEL == 4 ~ 3,
+      SOC_ECON_LEVEL %in% c(5, 6) ~ 4,
+      TRUE ~ NA_real_
+    ),
+    SEL_GROUP = factor(
+      SEL_GROUP,
+      levels = c(1, 2, 3, 4),
+      labels = c("Estrato 1 y 2", "Estrato 3", "Estrato 4", "Estrato 5 y 6")
+    ),
+
+    # 4) BMI (kg / m^2) - HEIGHT en cm
+    BMI = WEIGHT / ( (HEIGHT / 100)^2 ),
+
+    # 5) BMI_CAT (solo adultos; <18 = NA)
+    BMI_CAT = case_when(
+      AGE < 18 ~ NA_real_,
+      BMI < 18.5 ~ 1,
+      BMI >= 18.5 & BMI < 25 ~ 2,
+      BMI >= 25 & BMI < 30 ~ 3,
+      BMI >= 30 ~ 4,
+      TRUE ~ NA_real_
+    ),
+    BMI_CAT = factor(
+      BMI_CAT,
+      levels = c(1, 2, 3, 4),
+      labels = c("Bajo peso", "Normopeso", "Sobrepeso", "Obesidad")
+    ),
+
+    # 6) OVERWEIGHT (solo sobrepeso vs resto; adultos)
+    OVERWEIGHT = case_when(
+      AGE < 18 ~ NA_real_,
+      BMI >= 25 & BMI < 30 ~ 2,
+      !is.na(BMI) ~ 1,
+      TRUE ~ NA_real_
+    ),
+    OVERWEIGHT = factor(
+      OVERWEIGHT,
+      levels = c(1, 2),
+      labels = c("No sobrepeso", "Sobrepeso")
+    ),
+
+    # 7) OBESITY (adultos)
+    OBESITY = case_when(
+      AGE < 18 ~ NA_real_,
+      BMI >= 30 ~ 2,
+      BMI < 30 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    OBESITY = factor(
+      OBESITY,
+      levels = c(1, 2),
+      labels = c("No obesidad", "Obesidad")
+    ),
+
+    # 8) OVERW_OBESITY (adultos)
+    OVERW_OBESITY = case_when(
+      AGE < 18 ~ NA_real_,
+      BMI >= 25 ~ 2,
+      BMI < 25 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    OVERW_OBESITY = factor(
+      OVERW_OBESITY,
+      levels = c(1, 2),
+      labels = c("No (IMC <25)", "Sí (IMC >=25)")
+    ),
+
+    # 9) ABDOM_OBESITY (adultos; umbrales que diste)
+    # SEX: 1=Masculino, 2=Femenino (según tu diccionario)
+    ABDOM_OBESITY = case_when(
+      AGE < 18 ~ NA_real_,
+      SEX == 2 & WC >= 90 ~ 2,  # Mujeres
+      SEX == 1 & WC >= 94 ~ 2,  # Hombres
+      !is.na(WC) & SEX %in% c(1,2) ~ 1,
+      TRUE ~ NA_real_
+    ),
+    ABDOM_OBESITY = factor(
+      ABDOM_OBESITY,
+      levels = c(1, 2),
+      labels = c("No", "Sí")
+    ),
+
+    # 10) DIABETES_GLUCOSE (>=200 mg/dl)
+    DIABETES_GLUCOSE = case_when(
+      GLUCOSE < 200 ~ 1,
+      GLUCOSE >= 200 ~ 2,
+      TRUE ~ NA_real_
+    ),
+    DIABETES_GLUCOSE = factor(
+      DIABETES_GLUCOSE,
+      levels = c(1, 2),
+      labels = c("No", "Sí")
+    ),
+
+    # 11) DIABETES (antecedente o glucometría)
+    # DIABETES_PREV: 0=No, 1=Sí (según tu tabla)
+    DIABETES = case_when(
+      DIABETES_GLUCOSE == "Sí" | DIABETES_PREV %in% c(1, "1", "Sí", "Si") ~ 2,
+      DIABETES_GLUCOSE == "No" & DIABETES_PREV %in% c(0, "0", "No") ~ 1,
+      TRUE ~ NA_real_
+    ),
+    DIABETES = factor(
+      DIABETES,
+      levels = c(1, 2),
+      labels = c("No diabetes", "Diabetes")
+    ),
+    SEX = factor(
+      SEX,
+      levels = c(1, 2),
+      labels = c("Hombre", "Mujer")
+    ),
+    JOB_GROUP = case_when(
+      JOB == 1 ~ 1,
+      JOB == 2 ~ 2,
+      JOB == 3 ~ 2,
+      JOB == 4 ~ 3,
+      JOB == 5 ~ 4,
+      JOB == 6 ~ 5,
+      JOB == 7 ~ 6,
+      JOB == 8 ~ 7,
+      TRUE ~ NA_real_
+    ),
+    JOB_GROUP = factor(
+      JOB_GROUP,
+      levels = c(1,2,3,4,5,6,7),
+      labels = c("Empleado",
+                 "Independiente",
+                 "Pensionado",
+                 "Desempleado",
+                 "Estudiante",
+                 "Hogar",
+                 "Menor en casa")
+    ),
+    HOME_PEOPLE = case_when(
+      PEOPLE_AT_HOME == 1 ~ 1,
+      PEOPLE_AT_HOME == 2 ~ 2,
+      PEOPLE_AT_HOME == 3 ~ 3,
+      PEOPLE_AT_HOME >= 4 ~ 4,
+      TRUE ~ NA_real_
+      ),
+    HOME_PEOPLE = factor(
+      HOME_PEOPLE,
+      levels = c(1,2,3,4),
+      labels = c("Vive solo",
+                 "Vive con una persona",
+                 "Vive con dos personas",
+                 "Vive con tres o más personas")
+    )
+  )
+
+BASE_ESTUDIO <- base_total %>%
+  filter(
+    AGE >= 18,
+    !(SEX == 2 & PREGNANCY == "Sí")
+  )
+
+# Pesos 2 y 3 para PARA USAR PAQUETE WEMIX
+    
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(EXP_FACTOR2 = 1)
+    
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(EXP_FACTOR3 = 1)
+
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(EXP_FACTOR4 = 1)
+
+# CREAR ID UNICO PARA BUFFERS anidados a la ciudad
+
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(
+    BUF_ID_CITY = interaction(CITY_CODE, BUFFER_ID70, drop = TRUE)
+  )
+
+# CREAR ID UNICO PARA BARRIOS anidados a la ciudad
+
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(
+    BARRIO_ID_CITY = interaction(CITY_CODE, ID_SUBURB, drop = TRUE)
+  )
+
+# Crear variables del AFC agrupadas al buffer
+
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  group_by(BUF_ID_CITY) %>%
+  mutate(
+    # Ambiente caminable
+    INT_WALK_BY_KM2_L2 = mean(INT_WALK_BY_KM2, na.rm = TRUE),
+
+    # Transporte público (robusta)
+    DIST_STOPS_MEDIAN_L2 = median(DIST_STOPS_MEDIAN, na.rm = TRUE),
+
+    # Zonas verdes
+    GREEN_PERC_L2 = mean(GREEN_PERC, na.rm = TRUE),
+
+    # Ambiente alimentario
+    DENS_HEALTH_MARKET_L2 = mean(DENS_HEALTH_MARKET, na.rm = TRUE),
+    DENS_UNHEALTH_MARKET_L2 = mean(DENS_UNHEALTH_MARKET, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Incorporación de cambios en análisis descriptivo
+
+# Aplicar cambios
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(
+    WEIGHT = ifelse(ID == 757742, 83.8, WEIGHT),
+    WEIGHT = ifelse(ID %in% c(328341, 557847, 806458), NA_real_, WEIGHT),
+    HEIGHT = ifelse(ID %in% c(328341, 557847, 806458, 348569), NA_real_, HEIGHT)
+  )
+
+# Recalcular BMI solo si hay WEIGHT y HEIGHT
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(
+    BMI = ifelse(is.na(WEIGHT) | is.na(HEIGHT),
+                 NA_real_,
+                 WEIGHT / ((HEIGHT/100)^2))
+  )
+
+# Excluir outliers de BMI >45 Y WC <56
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(
+    BMI = ifelse(BMI > 45, NA_real_, BMI),
+    WC  = ifelse(WC  < 56, NA_real_, WC))
+
+# NA en BMI implausibles dado el WC
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(
+BMI = ifelse(ID %in% c(328341, 497225, 96778, 912698), NA_real_, BMI))
+
+
+# AGREGAR VARIABLE DE POBLACIÓN POR CIUDAD (DANE, proyeccion 2022)
+
+BASE_ESTUDIO <- BASE_ESTUDIO %>%
+  mutate(
+    POPULATION = case_when(
+      CITY_NAME == "BOGOTA"        ~ 7842853,
+      CITY_NAME == "MEDELLIN"      ~ 2530398,
+      CITY_NAME == "CALI"          ~ 2229598,
+      CITY_NAME == "BARRANQUILLA"  ~ 1309553,
+      CITY_NAME == "BUCARAMANGA"   ~ 600251,
+      TRUE                         ~ NA_real_
+    )
+  )
+  
+# Quitar NA para identificar outliers en modelo multinivel y que los codigos corran más rápido.
+  
+BASE_ESTUDIO_BMI <- BASE_ESTUDIO %>%
+  filter(!is.na(BMI))
+
+
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI %>%
+  group_by(CITY_NAME) %>%
+  mutate(
+    INT_Z           = as.numeric(scale(INT_WALK_BY_KM2_L2)),
+    GREEN_Z         = as.numeric(scale(GREEN_PERC_L2)),
+    DENS_HEALTH_Z   = as.numeric(scale(DENS_HEALTH_MARKET_L2)),
+    DENS_UNHEALTH_Z = as.numeric(scale(DENS_UNHEALTH_MARKET_L2))
+  ) %>%
+  ungroup()
+
+#--------------------------------------------------
+# Distancia a paraderos: Sin paraderos + Q1–Q4
+#--------------------------------------------------
+
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI_Z %>%
+  group_by(CITY_NAME) %>%
+  mutate(
+    q_pos = ntile(
+      if_else(DIST_STOPS_MEDIAN_L2 > 0,
+              DIST_STOPS_MEDIAN_L2,
+              NA_real_),
+      4
+    ),
+    STOPS_CAT = case_when(
+      DIST_STOPS_MEDIAN_L2 == 0 ~ "Sin paraderos",
+      DIST_STOPS_MEDIAN_L2 > 0  ~ paste0("Q", q_pos)
+    ),
+    STOPS_CAT = factor(
+      STOPS_CAT,
+      levels = c("Sin paraderos", "Q1", "Q2", "Q3", "Q4")
+    )
+  ) %>%
+  ungroup() %>%
+  select(-q_pos)
+
+#--------------------------------------------------
+# Variable alternativa: ceros reasignados a Q4
+#--------------------------------------------------
+
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI_Z %>%
+  mutate(
+    STOPS_Q4 = fct_collapse(
+      STOPS_CAT,
+      Q4 = c("Q4", "Sin paraderos")
+    ),
+    STOPS_Q4 = factor(STOPS_Q4, levels = c("Q1","Q2","Q3","Q4"))
+  )
+
+# LOG
+
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI_Z %>%
+  mutate(STOPS_Q4_NUM = as.numeric(STOPS_Q4))  # Q1=1, Q2=2, Q3=3, Q4=4
+
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI_Z %>%
+  mutate(
+    DENS_HEALTH_LOG  = log1p(DENS_HEALTH_MARKET_L2),
+    DENS_UNHEALTH_LOG = log1p(DENS_UNHEALTH_MARKET_L2),
+
+    # Z global (sobre toda la muestra)
+    DENS_HEALTH_LOG_ZG  = as.numeric(scale(DENS_HEALTH_LOG)),
+    DENS_UNHEALTH_LOG_ZG = as.numeric(scale(DENS_UNHEALTH_LOG))
+  ) %>%
+  group_by(CITY_NAME) %>%
+  mutate(
+    # Z intra-ciudad (sobre log)
+    DENS_HEALTH_LOG_ZC  = as.numeric(scale(DENS_HEALTH_LOG)),
+    DENS_UNHEALTH_LOG_ZC = as.numeric(scale(DENS_UNHEALTH_LOG))
+  ) %>%
+  ungroup()
+
+# POLINOMIOS
+
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI_Z %>% 
+  mutate(AGE_c = AGE - mean(AGE, na.rm = TRUE),
+                      AGE_c2 = AGE_c^2)
+
+```
+
+
+# Modelo nulo
+
+```{r}
+MOD3_NULL <- mix(
+  BMI ~ 1  + (1 | BUF_ID_CITY) + (1 | CITY_NAME),
+  data = BASE_ESTUDIO_BMI_Z,
+  weights = c("EXP_FACTOR", "EXP_FACTOR2", "EXP_FACTOR3")
+)
+
+summary(MOD3_NULL)
+```
+
+# Modelo con variables del AFC
+
+```{r}
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI_Z %>%
+  mutate(
+    DENS_HEALTH_LOG  = log1p(DENS_HEALTH_MARKET_L2),
+    DENS_UNHEALTH_LOG = log1p(DENS_UNHEALTH_MARKET_L2),
+
+    # Z global (sobre toda la muestra)
+    DENS_HEALTH_LOG_ZG  = as.numeric(scale(DENS_HEALTH_LOG)),
+    DENS_UNHEALTH_LOG_ZG = as.numeric(scale(DENS_UNHEALTH_LOG))
+  ) %>%
+  group_by(CITY_NAME) %>%
+  mutate(
+    # Z intra-ciudad (sobre log)
+    DENS_HEALTH_LOG_ZC  = as.numeric(scale(DENS_HEALTH_LOG)),
+    DENS_UNHEALTH_LOG_ZC = as.numeric(scale(DENS_UNHEALTH_LOG))
+  ) %>%
+  ungroup()
+
+
+MOD3_AFC <- mix(BMI ~
+                  AGE + SEX + EDU_GROUP + SEL_GROUP + 
+                  DENS_HEALTH_LOG_ZC + DENS_UNHEALTH_LOG_ZC + 
+                  (1 | BUF_ID_CITY) + (1 | CITY_NAME),
+  data = BASE_ESTUDIO_BMI_Z,
+  weights = c("EXP_FACTOR", "EXP_FACTOR2", "EXP_FACTOR3")
+)
+
+summary(MOD3_AFC)
+```
+
+# Interacciones
+
+```{r}
+MOD3_AFC_INT_ALL <- mix(BMI ~
+                  AGE + SEX + EDU_GROUP + SEL_GROUP + 
+                  DENS_HEALTH_LOG_ZC*SEX + 
+                  DENS_UNHEALTH_LOG_ZC*SEX + 
+                  DENS_HEALTH_LOG_ZC*EDU_GROUP +
+                  DENS_UNHEALTH_LOG_ZC*EDU_GROUP +
+                  (1 | BUF_ID_CITY) + (1 | CITY_NAME),
+  data = BASE_ESTUDIO_BMI_Z,
+  weights = c("EXP_FACTOR", "EXP_FACTOR2", "EXP_FACTOR3")
+)
+
+summary(MOD3_AFC_INT_ALL)
+```
+
+```{r}
+m <- MOD3_AFC_INT_ALL
+
+#=========================================================
+# A) DENS_HEALTH_Z × SEXO (1 coeficiente)
+#=========================================================
+waldTest(m, type = "beta",
+         coefs = c("SEXMujer:DENS_HEALTH_LOG_ZC"))
+
+#=========================================================
+# B) DENS_HEALTH_Z × NIVEL EDUCATIVO (2 coeficientes)
+#=========================================================
+waldTest(m, type = "beta",
+         coefs = c("EDU_GROUPSecundaria o técnico:DENS_HEALTH_LOG_ZC",
+                   "EDU_GROUPProfesional o mayor:DENS_HEALTH_LOG_ZC"))
+
+#=========================================================
+# C) DENS_UNHEALTH_Z × SEXO (1 coeficiente)
+#=========================================================
+waldTest(m, type = "beta",
+         coefs = c("SEXMujer:DENS_UNHEALTH_LOG_ZC"))
+
+#=========================================================
+# D) DENS_UNHEALTH_Z × NIVEL EDUCATIVO (2 coeficientes)
+#=========================================================
+waldTest(m, type = "beta",
+         coefs = c("EDU_GROUPSecundaria o técnico:DENS_UNHEALTH_LOG_ZC",
+                   "EDU_GROUPProfesional o mayor:DENS_UNHEALTH_LOG_ZC"))
+```
+
+
+
+# Random slopes
+
+```{r}
+MOD3_SLOPES <- mix(BMI ~
+                  AGE + SEX + EDU_GROUP + SEL_GROUP + 
+                  DENS_HEALTH_LOG_ZC*SEX + 
+                  DENS_HEALTH_LOG_ZC*EDU_GROUP +
+                  DENS_UNHEALTH_LOG_ZC*EDU_GROUP +
+                  (1 | BUF_ID_CITY) + 
+                  (1 + DENS_HEALTH_LOG_ZC + DENS_UNHEALTH_LOG_ZC | CITY_NAME),
+  data = BASE_ESTUDIO_BMI_Z,
+  weights = c("EXP_FACTOR", "EXP_FACTOR2", "EXP_FACTOR3")
+)
+
+summary(MOD3_SLOPES)
+```
+
+
+# Diagnóstico
+
+En nivel 1 es igual a modelos previos, agregar un termino cuadrado a AGE.
+
+```{r}
+
+BASE_ESTUDIO_BMI_Z <- BASE_ESTUDIO_BMI_Z %>% 
+  mutate(AGE_c = AGE - mean(AGE, na.rm = TRUE),
+                      AGE_c2 = AGE_c^2)
+
+MOD3_F1 <- mix(BMI ~
+                  AGE_c + AGE_c2 + SEX + EDU_GROUP + SEL_GROUP + 
+                  DENS_HEALTH_LOG_ZC*SEX + 
+                  DENS_HEALTH_LOG_ZC*EDU_GROUP +
+                  DENS_UNHEALTH_LOG_ZC*EDU_GROUP +
+                  (1 | BUF_ID_CITY) + 
+                  (1 + DENS_HEALTH_LOG_ZC + DENS_UNHEALTH_LOG_ZC | CITY_NAME),
+  data = BASE_ESTUDIO_BMI_Z,
+  weights = c("EXP_FACTOR", "EXP_FACTOR2", "EXP_FACTOR3")
+)
+
+summary(MOD3_F1)
+```
+
+## Nivel 2: linealidad y homocedasticidad
+
+```{r}
+#========================================================
+# 1) Helper: extraer RBEE (EB estandarizados) desde WeMix
+#    RBEE = u_hat / SD(u)  (SD = sqrt(varianza estimada del RE))
+#========================================================
+get_RBEE <- function(mod, group){
+  if(is.null(mod$ranefMat[[group]])) stop("No existe ranefMat para el grupo: ", group)
+  if(is.null(mod$varVC[[group]]))    stop("No existe varVC para el grupo: ", group)
+
+  U  <- as.data.frame(mod$ranefMat[[group]])             # EB (BLUP)
+  sd <- sqrt(diag(as.matrix(mod$varVC[[group]])))        # SD del RE (por término)
+  if(length(sd) != ncol(U)) stop("No coincide #SD con #columnas de ranefMat en ", group)
+
+  RBEE <- sweep(as.matrix(U), 2, sd, "/")                # estandarizar por columna
+
+  out <- as.data.frame(RBEE)
+  out[[group]] <- rownames(U)
+
+  # dejar el id primero
+  out <- out %>% relocate(all_of(group))
+  out
+}
+
+#========================================================
+# 2) Extraer RBEE para tus dos niveles contextuales
+#    - BUF_ID_CITY: intercept aleatorio
+#    - CITY_NAME: intercept + slopes aleatorios
+#========================================================
+rbee_buf  <- get_RBEE(MOD3_F1, "BUF_ID_CITY")   # col esperada: (Intercept)
+rbee_city <- get_RBEE(MOD3_F1, "CITY_NAME")     # cols: (Intercept), INT_Z, GREEN_Z, STOPS_Q4_NUM
+
+#========================================================
+# 3) Armar bases nivel 2 para graficar (1 fila por cluster)
+#    Ajusta aquí cuáles son tus covariables L2.
+#========================================================
+L2_vars_buf <- c("DENS_HEALTH_LOG_ZC","DENS_UNHEALTH_LOG_ZC")  # <- edita si aplica
+
+dat_L2_buf <- BASE_ESTUDIO_BMI_Z %>%
+  select(BUF_ID_CITY, any_of(L2_vars_buf)) %>%
+  distinct()
+
+dat_L2_city <- BASE_ESTUDIO_BMI_Z %>%
+  select(CITY_NAME) %>%
+  distinct()
+
+# Merge RBEE + covariables L2
+buf_df  <- dat_L2_buf  %>% left_join(rbee_buf,  by = "BUF_ID_CITY")
+city_df <- dat_L2_city %>% left_join(rbee_city, by = "CITY_NAME")
+
+#========================================================
+# 4) Helpers de gráficos
+#    - Continuas: RBEE vs x (scatter + loess)
+#    - Categóricas: boxplot de RBEE por categoría
+#========================================================
+plot_rbee_cont <- function(df, x, rbee, title){
+  ggplot(df, aes(x = .data[[x]], y = .data[[rbee]])) +
+    geom_point(alpha = 0.35) +
+    geom_smooth(se = FALSE, method = "loess") +
+    geom_hline(yintercept = 0, linetype = 2) +
+    labs(x = x, y = rbee, title = title)
+}
+
+plot_rbee_cat <- function(df, x, rbee, title){
+  ggplot(df, aes(x = .data[[x]], y = .data[[rbee]])) +
+    geom_boxplot(outlier.alpha = 0.6) +
+    geom_hline(yintercept = 0, linetype = 2) +
+    labs(x = x, y = rbee, title = title)
+}
+
+#========================================================
+# 5) Linealidad + homocedasticidad nivel 2 (BUF_ID_CITY)
+#    (en tu flujograma: RBEE vs cada variable L2)
+#========================================================
+
+# Nota: en rbee_buf el RBEE del intercepto suele llamarse "(Intercept)"
+rbee_int_buf <- "(Intercept)"
+
+p_buf_health   <- plot_rbee_cont(buf_df, "DENS_HEALTH_LOG_ZC",        rbee_int_buf,
+                               "Nivel 2 (BUF_ID_CITY): RBEE (intercepto) vs DENS_HEALTH_LOG_ZC")
+p_buf_unhealth  <- plot_rbee_cont(buf_df, "DENS_UNHEALTH_LOG_ZC",      rbee_int_buf,
+                               "Nivel 2 (BUF_ID_CITY): RBEE (intercepto) vs DENS_UNHEALTH_LOG_ZC")
+
+p_buf_health
+p_buf_unhealth
+
+```
+
+# Nivel 2: outliers e influencia
+
+```{r}
+#---------------------------------------
+# Función general para RBEE
+#---------------------------------------
+get_RBEE_all <- function(mod, group){
+
+  U <- as.data.frame(mod$ranefMat[[group]])
+  sd <- sqrt(diag(as.matrix(mod$varVC[[group]])))
+
+  RBEE <- sweep(as.matrix(U), 2, sd, "/") |> as.data.frame()
+
+  RBEE[[group]] <- rownames(U)
+
+  RBEE |>
+    relocate(all_of(group)) |>
+    pivot_longer(
+      cols = -all_of(group),
+      names_to  = "term",
+      values_to = "RBEE"
+    )
+}
+
+#---------------------------------------
+# RBEE por nivel 2
+#---------------------------------------
+rbee_buf  <- get_RBEE_all(MOD3_F1, "BUF_ID_CITY")
+rbee_city <- get_RBEE_all(MOD3_F1, "CITY_NAME")
+
+ggplot(rbee_buf, aes(x = term, y = RBEE)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(
+    title = "Nivel 2 (BUF_ID_CITY): RBEE del intercepto",
+    y = "RBEE"
+  ) +
+  theme_minimal()
+```
+```{r}
+detect_outliers <- function(df){
+  df |>
+    group_by(term) |>
+    mutate(
+      q1 = quantile(RBEE, 0.25, na.rm = TRUE),
+      q3 = quantile(RBEE, 0.75, na.rm = TRUE),
+      iqr = q3 - q1,
+      lower = q1 - 1.5 * iqr,
+      upper = q3 + 1.5 * iqr,
+      outlier = RBEE < lower | RBEE > upper
+    ) |>
+    ungroup() |>
+    filter(outlier)
+}
+
+outliers_buf  <- detect_outliers(rbee_buf)
+outliers_city <- detect_outliers(rbee_city)
+
+outliers_buf
+```
+
+
+```{r}
+#===========================================================
+# LOCO por BUF_ID_CITY para MOD3_F1 (BMI)
+# Influencia sobre betas de interés y varianzas principales
+#===========================================================
+
+library(dplyr)
+library(tibble)
+library(WeMix)
+
+#===========================================================
+# 0) Inputs
+#===========================================================
+dat         <- BASE_ESTUDIO_BMI_Z
+mod_full    <- MOD3_F1
+weights_vec <- c("EXP_FACTOR", "EXP_FACTOR2", "EXP_FACTOR3")
+
+form_MOD3_F1 <- BMI ~
+  AGE_c + AGE_c2 + SEX + EDU_GROUP + SEL_GROUP +
+  DENS_HEALTH_LOG_ZC * SEX +
+  DENS_HEALTH_LOG_ZC * EDU_GROUP +
+  DENS_UNHEALTH_LOG_ZC * EDU_GROUP +
+  (1 | BUF_ID_CITY) +
+  (1 + DENS_HEALTH_LOG_ZC + DENS_UNHEALTH_LOG_ZC | CITY_NAME)
+
+#===========================================================
+# 1) Parámetros de interés (según summary/str reales)
+#===========================================================
+fix_primary <- c(
+  "DENS_HEALTH_LOG_ZC",
+  "DENS_UNHEALTH_LOG_ZC"
+)
+
+var_primary <- c(
+  "BUF_ID_CITY.(Intercept)",
+  "CITY_NAME.(Intercept)",
+  "CITY_NAME.DENS_HEALTH_LOG_ZC",
+  "CITY_NAME.DENS_UNHEALTH_LOG_ZC"
+)
+
+#===========================================================
+# Helpers
+#===========================================================
+safe_extract_named <- function(x, nms){
+  out <- rep(NA_real_, length(nms)); names(out) <- nms
+  hit <- intersect(names(x), nms)
+  out[hit] <- x[hit]
+  out
+}
+
+safe_pct_change <- function(new, old, eps = 1e-8){
+  den <- ifelse(is.na(old), NA_real_, pmax(abs(old), eps))
+  abs(new - old) / den
+}
+
+# (Opcional) extraer varianza residual consistente
+get_resid_var <- function(m){
+  if (!is.null(m$varVC) && !is.null(m$varVC$Residual)) return(as.numeric(m$varVC$Residual))
+  return(NA_real_)
+}
+
+#===========================================================
+# 2) Candidatos: outliers en BUF_ID_CITY
+#===========================================================
+cand_buf <- outliers_buf %>%
+  distinct(BUF_ID_CITY) %>%
+  pull(BUF_ID_CITY)
+
+stopifnot(length(cand_buf) > 0)
+
+#===========================================================
+# 3) Config LOCO con guardado
+#===========================================================
+set.seed(123)
+
+save_every <- 3
+out_file   <- "loco_BUF_progress_MOD3_F1.rds"
+
+thr_betaSE <- 1.0     # |Δβ|/SE_full > 1
+thr_var    <- 0.20    # Δ varianza relativa > 20%
+
+#===========================================================
+# 4) Extraer FULL (optimiza)
+#===========================================================
+# (a) betas y SE full
+b_full  <- safe_extract_named(mod_full$coef, fix_primary)
+se_full <- safe_extract_named(mod_full$SE,   fix_primary)
+
+# (b) varianzas full (las que están en mod_full$vars)
+v_full  <- safe_extract_named(mod_full$vars, var_primary)
+
+# (c) residual (opcional)
+resid_full <- get_resid_var(mod_full)
+
+#===========================================================
+# 5) Reanudar si existe
+#===========================================================
+if (file.exists(out_file)) {
+  state <- readRDS(out_file)
+  done  <- state$done
+  res   <- state$res
+  cat("🔁 Reanudando LOCO. Ya completados:", length(done), "de", length(cand_buf), "\n")
+} else {
+  done <- character(0)
+  res  <- tibble()
+  saveRDS(list(done = done, res = res, started_at = Sys.time()), out_file)
+  cat("🟢 Iniciando LOCO. Candidatos:", length(cand_buf), "\n")
+}
+
+remaining <- setdiff(as.character(cand_buf), as.character(done))
+
+#===========================================================
+# 6) Loop LOCO
+#===========================================================
+t0_all <- Sys.time()
+
+for (i in seq_along(remaining)) {
+
+  cl <- remaining[i]
+  t0 <- Sys.time()
+
+  cat(sprintf("(%02d/%02d) LOCO excluyendo BUF_ID_CITY = %s ... ",
+              length(done) + i, length(cand_buf), cl))
+
+  row_i <- tryCatch({
+
+    dat_sub <- dat[dat$BUF_ID_CITY != cl, , drop = FALSE]
+
+    m_drop <- mix(
+      formula = form_MOD3_F1,
+      data    = dat_sub,
+      weights = weights_vec
+    )
+
+    # betas y varianzas en modelo drop
+    b_drop <- safe_extract_named(m_drop$coef, fix_primary)
+    v_drop <- safe_extract_named(m_drop$vars, var_primary)
+
+    # cambios betas (normalizados por SE del full)
+    delta_beta    <- b_drop - b_full
+    delta_beta_SE <- abs(delta_beta) / se_full
+
+    # cambios varianzas (relativo, seguro)
+    pct_delta_var <- safe_pct_change(v_drop, v_full, eps = 1e-8)
+
+    # residual (opcional)
+    resid_drop <- get_resid_var(m_drop)
+    pct_delta_resid <- safe_pct_change(resid_drop, resid_full, eps = 1e-8)
+
+    flag_beta <- any(delta_beta_SE > thr_betaSE, na.rm = TRUE)
+    flag_var  <- any(pct_delta_var  > thr_var,  na.rm = TRUE)
+
+    tibble(
+      BUF_ID_CITY = as.character(cl),
+
+      # betas
+      max_delta_beta_SE = max(delta_beta_SE, na.rm = TRUE),
+      which_beta        = names(delta_beta_SE)[which.max(delta_beta_SE)],
+      delta_beta_that   = unname(delta_beta[which.max(delta_beta_SE)]),
+
+      # varianzas
+      max_pct_delta_var  = max(pct_delta_var, na.rm = TRUE),
+      which_var          = names(pct_delta_var)[which.max(pct_delta_var)],
+      pct_delta_var_that = unname(pct_delta_var[which.max(pct_delta_var)]),
+
+      # residual (opcional)
+      pct_delta_resid = pct_delta_resid,
+
+      influential_any  = flag_beta || flag_var,
+      influential_both = flag_beta && flag_var,
+
+      status = "ok",
+      error  = NA_character_
+    )
+
+  }, error = function(e){
+
+    tibble(
+      BUF_ID_CITY = as.character(cl),
+
+      max_delta_beta_SE = NA_real_,
+      which_beta        = NA_character_,
+      delta_beta_that   = NA_real_,
+
+      max_pct_delta_var  = NA_real_,
+      which_var          = NA_character_,
+      pct_delta_var_that = NA_real_,
+
+      pct_delta_resid = NA_real_,
+
+      influential_any  = NA,
+      influential_both = NA,
+
+      status = "error",
+      error  = as.character(e$message)
+    )
+  })
+
+  res  <- bind_rows(res, row_i)
+  done <- c(done, as.character(cl))
+
+  dt <- difftime(Sys.time(), t0, units = "secs")
+  cat(sprintf("listo (%.1f s)\n", as.numeric(dt)))
+
+  if ((length(done) %% save_every) == 0 || (length(done) == length(cand_buf))) {
+    saveRDS(list(done = done, res = res, updated_at = Sys.time()), out_file)
+    cat("💾 Progreso guardado en:", out_file, "\n")
+  }
+}
+
+cat("✅ LOCO terminado. Tiempo total:",
+    round(as.numeric(difftime(Sys.time(), t0_all, units = "mins")), 2), "min\n")
+
+#===========================================================
+# 7) Salida final + guardar
+#===========================================================
+res_final <- res %>%
+  arrange(desc(influential_both),
+          desc(influential_any),
+          desc(max_delta_beta_SE),
+          desc(max_pct_delta_var))
+
+final_file <- "loco_BUF_results_MOD3_F1.rds"
+saveRDS(res_final, final_file)
+
+cat("📦 Resultados finales guardados en:", final_file, "\n")
+
+res_final
+```
+
+
+
+# Nivel 1: outliers e influencia
+
+```{r}
+#========================================================
+# Boxplot: residuales condicionales estandarizados (nivel 1)
+#========================================================
+library(dplyr)
+library(ggplot2)
+
+# 1) Residual condicional (y - mu) ya viene en MOD2_F1$resid
+e_cond <- as.numeric(MOD3_F1$resid)
+
+# 2) Estandarización: dividir por sigma (SD residual del modelo)
+#    (aprox. "conditional standardized residuals")
+r_std <- e_cond / MOD3_F1$sigma
+
+# 3) Data frame para graficar
+df_r <- tibble(
+  id_obs = names(MOD3_F1$resid),
+  r_std  = r_std
+)
+
+# 4) Boxplot (distribución de residuales estandarizados)
+ggplot(df_r, aes(x = "", y = r_std)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  geom_hline(yintercept = c(-3, 0, 3), linetype = c(2, 1, 2)) +
+  labs(
+    title = "Nivel 1: residuales condicionales estandarizados",
+    x = NULL,
+    y = "Residual estandarizado (e_cond / sigma)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+
+
+# Nivel 1: normalidad
+
+```{r}
+#----------------------------
+# Helper: qqplot + hist
+#----------------------------
+plot_qq_hist <- function(x, title_prefix){
+  x <- x[is.finite(x)]
+
+  # QQ plot
+  p1 <- ggplot(data.frame(x = x), aes(sample = x)) +
+    stat_qq() +
+    stat_qq_line() +
+    labs(
+      title = paste0(title_prefix, " — Q–Q plot"),
+      x = "Cuantiles teóricos",
+      y = "Cuantiles muestrales"
+    )
+
+  # Histograma
+  p2 <- ggplot(data.frame(x = x), aes(x = x)) +
+    geom_histogram(bins = 35) +
+    labs(
+      title = paste0(title_prefix, " — Histograma"),
+      x = "Valor",
+      y = "Frecuencia"
+    )
+
+  list(qq = p1, hist = p2)
+}
+
+#===========================================================
+# 1) NIVEL 1: residuos condicionales estandarizados (MOD_1_F2)
+#===========================================================
+
+# Residuales condicionales
+e_cond <- as.numeric(MOD3_F1$resid)
+
+# "Estandarizados": divide por sigma del modelo
+# (esto es lo más directo con el objeto WeMix que muestras)
+r_std_L1 <- e_cond / MOD3_F1$sigma
+
+plots_L1 <- plot_qq_hist(r_std_L1, "Nivel 1: residuos condicionales estandarizados")
+plots_L1$qq
+plots_L1$hist
+```
+
+# Nivel 2: normalidad
+
+```{r}
+#===========================================================
+# 2) NIVEL 2: EB estandarizados (MOD_1_F2$ranefMat)
+#   2a) BUF_ID_CITY: intercepto
+#   2b) CITY_NAME: intercepto + pendientes (INT_Z, GREEN_Z, STOPS_Q4_NUM)
+#===========================================================
+
+#----------------------------
+# 2a) BUF_ID_CITY (solo intercepto)
+#----------------------------
+eb_buf_int <- MOD3_F1$ranefMat$BUF_ID_CITY[["(Intercept)"]]
+eb_buf_int_std <- as.numeric(scale(eb_buf_int))
+
+plots_L2_buf <- plot_qq_hist(eb_buf_int_std, "Nivel 2: EB estandarizados — BUF_ID_CITY (intercepto)")
+plots_L2_buf$qq
+plots_L2_buf$hist
+```
+
+
+_________________________________________________________________________________________________________________
+_________________________________________________________________________________________________________________
+_________________________________________________________________________________________________________________
+
+MODELO 3 FINAL
+
+```{r}
+MOD3_F1 <- mix(BMI ~
+                  AGE_c + AGE_c2 + SEX + EDU_GROUP + SEL_GROUP + 
+                  DENS_HEALTH_LOG_ZC*SEX + 
+                  DENS_HEALTH_LOG_ZC*EDU_GROUP +
+                  DENS_UNHEALTH_LOG_ZC*EDU_GROUP +
+                  (1 | BUF_ID_CITY) + 
+                  (1 + DENS_HEALTH_LOG_ZC + DENS_UNHEALTH_LOG_ZC | CITY_NAME),
+  data = BASE_ESTUDIO_BMI_Z,
+  weights = c("EXP_FACTOR", "EXP_FACTOR2", "EXP_FACTOR3")
+)
+```
+
+_________________________________________________________________________________________________________________
+_________________________________________________________________________________________________________________
+_________________________________________________________________________________________________________________
+
+
+
+Graphs english version
+
+```{r}
+#=========================================================
+# FOREST PLOTS - MODEL 3 (Food-related built environment x Body Mass Index)
+# English labels | whisker end caps | ColorBrewer "Set1" palette
+#=========================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+
+mod      <- MOD3_F1
+city_var <- "CITY_NAME"
+
+# ---------------------------------------------------------
+# Common theme
+# ---------------------------------------------------------
+tema_forest <- theme_classic(base_size = 12) +
+  theme(
+    legend.position   = "bottom",
+    legend.direction  = "horizontal",
+    legend.text       = element_text(size = 12, color = "black"),
+    legend.title      = element_text(size = 12, face = "bold", color = "black"),
+
+    axis.ticks.y      = element_blank(),
+    axis.line.y       = element_blank(),
+    axis.text.y       = element_text(face = "bold", size = 12, color = "black"),
+    axis.text.x       = element_text(size = 12, color = "black"),
+    axis.title.x      = element_text(size = 12, color = "black"),
+
+    strip.background  = element_blank(),
+    strip.text        = element_text(face = "bold", size = 12, color = "black"),
+
+    plot.margin       = margin(8, 14, 8, 8)
+  )
+
+# ---------------------------------------------------------
+# City order / display labels
+# Internal codes (BOGOTA, MEDELLIN, ..., "Global") are kept unchanged
+# so all matching logic below (is_pop, tibble(), etc.) still works.
+# Only the DISPLAY label vector is translated ("Global" -> "Overall").
+# ---------------------------------------------------------
+city_order  <- c("BOGOTA", "MEDELLIN", "CALI", "BARRANQUILLA", "BUCARAMANGA", "Global")
+city_labels <- c("Bogota", "Medellin", "Cali", "Barranquilla", "Bucaramanga", "Overall")
+pretty_city <- setNames(city_labels, city_order)
+
+# ---------------------------------------------------------
+# Educational level: internal matching values MUST stay in Spanish
+# (they must match the fitted model's actual factor levels). English
+# display text is supplied only via `labels =` in scale_color_manual().
+# ---------------------------------------------------------
+edu_levels    <- c("Primaria", "Secundaria o técnico", "Profesional o mayor")
+edu_labels_en <- c("Elementary or lower", "High school", "College or higher")
+
+# ---------------------------------------------------------
+# Color palette: ColorBrewer "Set1" (vivid qualitative palette)
+# ---------------------------------------------------------
+pal_city <- c(
+  "BOGOTA"       = "#4DAF4A",  # green
+  "MEDELLIN"     = "#FF7F00",  # orange
+  "CALI"         = "#377EB8",  # blue
+  "BARRANQUILLA" = "#F781BF",  # pink
+  "BUCARAMANGA"  = "#A65628",  # brown
+  "Global"       = "#333333"   # charcoal (unchanged)
+)
+
+pal_edu <- c(
+  "Primaria"              = "#4DAF4A",  # green    -> "Elementary or lower"
+  "Secundaria o técnico"  = "#FF7F00",  # orange    -> "High school or technical"
+  "Profesional o mayor"   = "#377EB8"   # blue      -> "College or higher"
+)
+
+# Sex palette: same Set1 family, blue/red pair (internal levels stay
+# "Hombre"/"Mujer" to match mod$coef names; legend text is translated
+# via the `labels =` argument in scale_color_manual()).
+pal_sex <- c(
+  "Hombre" = "#377EB8",  # blue -> "Men"
+  "Mujer"  = "#E41A1C"   # red  -> "Women"
+)
+
+# Standardized export settings
+export_w   <- 9
+export_h   <- 5
+export_dpi <- 400
+
+#=========================================================
+# Helper: symmetric limits and adaptive breaks for the x-axis
+#=========================================================
+sym_x_scale <- function(lwr, upr, target_breaks = 7) {
+  m <- max(abs(c(lwr, upr)), na.rm = TRUE)
+  lim <- m * 1.05
+  raw_breaks <- pretty(c(-lim, lim), n = target_breaks)
+  step <- raw_breaks[2] - raw_breaks[1]
+  max_break <- ceiling(lim / step) * step
+  breaks <- seq(-max_break, max_break, by = step)
+  list(
+    limits = c(-max_break, max_break),
+    breaks = breaks
+  )
+}
+
+#=========================================================
+# FOREST PLOT 1: Supermarket density (DENS_HEALTH_LOG_ZC), by city
+# File: Fig8A_supermarket_density_by_city.png
+# FIX vs. original: added sym_x_scale() + scale_x_continuous() so
+# this panel uses the same symmetric scale and dotted reference
+# lines as the other 4 panels of this figure (the original code
+# for this specific plot omitted them, unlike the analogous
+# Model 4 script).
+#=========================================================
+
+expo <- "DENS_HEALTH_LOG_ZC"
+stopifnot(expo %in% names(mod$coef))
+
+beta_EXPO     <- unname(mod$coef[expo])
+Vfix          <- mod$cov_mat
+var_beta_EXPO <- Vfix[expo, expo]
+G             <- mod$varVC[[city_var]]
+var_u_EXPO    <- G[expo, expo]
+
+u_city <- as.data.frame(mod$ranefMat[[city_var]]) %>%
+  rownames_to_column("CITY_NAME")
+
+df_city <- u_city %>%
+  transmute(
+    CITY_NAME,
+    slope = beta_EXPO + .data[[expo]],
+    se    = sqrt(var_beta_EXPO + var_u_EXPO),
+    lwr   = slope - 1.96 * se,
+    upr   = slope + 1.96 * se
+  )
+
+pop_df <- tibble(
+  CITY_NAME = "Global",
+  slope = beta_EXPO,
+  se    = sqrt(var_beta_EXPO),
+  lwr   = beta_EXPO - 1.96 * sqrt(var_beta_EXPO),
+  upr   = beta_EXPO + 1.96 * sqrt(var_beta_EXPO)
+)
+
+plot_df <- bind_rows(df_city, pop_df) %>%
+  mutate(
+    CITY_NAME = factor(as.character(CITY_NAME), levels = city_order),
+    city_y = as.numeric(CITY_NAME),
+    is_pop = (as.character(CITY_NAME) == "Global")
+  ) %>%
+  filter(!is.na(CITY_NAME))
+
+y_prom <- unique(plot_df$city_y[plot_df$CITY_NAME == "Global"])
+
+# Symmetric scale (added for consistency with the other panels)
+x_scale <- sym_x_scale(plot_df$lwr, plot_df$upr, target_breaks = 7)
+
+p_health_city <- ggplot(plot_df, aes(x = slope, y = city_y, color = CITY_NAME)) +
+  annotate("rect", xmin = -Inf, xmax = Inf,
+           ymin = y_prom - 0.42, ymax = y_prom + 0.42,
+           fill = "grey92", alpha = 0.6) +
+  geom_vline(xintercept = setdiff(x_scale$breaks, 0),
+             linetype = "dotted", linewidth = 0.4, color = "grey70") +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             linewidth = 0.7, color = "grey35") +
+  # height > 0 adds a short vertical cap at each end of the CI
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.18, linewidth = 0.9) +
+  geom_point(aes(shape = is_pop), size = 3.0) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 18), guide = "none") +
+  scale_color_manual(values = pal_city, guide = "none") +
+  scale_x_continuous(
+    limits = x_scale$limits,
+    breaks = x_scale$breaks,
+    expand = c(0, 0)
+  ) +
+  scale_y_reverse(
+    breaks = seq_along(city_order),
+    labels = city_labels,
+    expand = expansion(mult = c(0.02, 0.03))
+  ) +
+  labs(x = expression(beta * " (95% CI)"), y = NULL) +
+  tema_forest
+
+ggsave("Fig8A_supermarket_density_by_city.png", p_health_city,
+       width = export_w, height = export_h, units = "in",
+       dpi = export_dpi, bg = "white")
+
+#=========================================================
+# FOREST PLOT 2: Supermarket density x Sex, by city
+# File: Fig8B_supermarket_density_by_sex.png
+#=========================================================
+
+expo <- "DENS_HEALTH_LOG_ZC"
+b_EXPO <- expo
+
+b_EXPOxS <- paste0("SEXMujer:", expo)
+if (!b_EXPOxS %in% names(mod$coef)) {
+  b_EXPOxS_alt <- paste0(expo, ":SEXMujer")
+  if (b_EXPOxS_alt %in% names(mod$coef)) b_EXPOxS <- b_EXPOxS_alt
+}
+stopifnot(all(c(b_EXPO, b_EXPOxS) %in% names(mod$coef)))
+
+u_city <- as.data.frame(mod$ranefMat[[city_var]]) %>%
+  rownames_to_column("CITY_NAME")
+
+beta_EXPO       <- unname(mod$coef[b_EXPO])
+beta_EXPOxS     <- unname(mod$coef[b_EXPOxS])
+Vfix            <- mod$cov_mat
+var_beta_EXPO   <- Vfix[b_EXPO, b_EXPO]
+var_beta_EXPOxS <- Vfix[b_EXPOxS, b_EXPOxS]
+cov_EXPO_EXPOxS <- Vfix[b_EXPO, b_EXPOxS]
+var_u_EXPO      <- mod$varVC[[city_var]][expo, expo]
+
+df_city <- u_city %>%
+  transmute(
+    CITY_NAME,
+    u_EXPO  = .data[[expo]],
+    slope_h = beta_EXPO + u_EXPO,
+    slope_m = beta_EXPO + beta_EXPOxS + u_EXPO,
+    se_h    = sqrt(var_beta_EXPO + var_u_EXPO),
+    se_m    = sqrt(var_beta_EXPO + var_beta_EXPOxS + 2 * cov_EXPO_EXPOxS + var_u_EXPO),
+    lwr_h   = slope_h - 1.96 * se_h, upr_h = slope_h + 1.96 * se_h,
+    lwr_m   = slope_m - 1.96 * se_m, upr_m = slope_m + 1.96 * se_m
+  ) %>%
+  pivot_longer(
+    cols = c(slope_h, slope_m, se_h, se_m, lwr_h, lwr_m, upr_h, upr_m),
+    names_to = c(".value", "sex"),
+    names_pattern = "(slope|se|lwr|upr)_(h|m)"
+  ) %>%
+  mutate(sex = factor(ifelse(sex == "h", "Hombre", "Mujer"),
+                       levels = c("Hombre", "Mujer")))
+
+pop_df <- bind_rows(
+  tibble(CITY_NAME = "Global",
+         sex = factor("Hombre", levels = c("Hombre", "Mujer")),
+         slope = beta_EXPO, se = sqrt(var_beta_EXPO)),
+  tibble(CITY_NAME = "Global",
+         sex = factor("Mujer", levels = c("Hombre", "Mujer")),
+         slope = beta_EXPO + beta_EXPOxS,
+         se = sqrt(var_beta_EXPO + var_beta_EXPOxS + 2 * cov_EXPO_EXPOxS))
+) %>%
+  mutate(lwr = slope - 1.96 * se, upr = slope + 1.96 * se)
+
+plot_df <- bind_rows(df_city, pop_df) %>%
+  mutate(
+    CITY_NAME = factor(as.character(CITY_NAME), levels = city_order),
+    sex = factor(sex, levels = c("Hombre", "Mujer")),
+    city_y = as.numeric(CITY_NAME),
+    y = city_y + ifelse(sex == "Mujer", +0.18, -0.18)
+  ) %>%
+  filter(!is.na(CITY_NAME))
+
+y_prom <- unique(plot_df$city_y[plot_df$CITY_NAME == "Global"])
+x_scale <- sym_x_scale(plot_df$lwr, plot_df$upr, target_breaks = 7)
+
+p_health_sex <- ggplot(plot_df, aes(x = slope, y = y, color = sex)) +
+  annotate("rect", xmin = -Inf, xmax = Inf,
+           ymin = y_prom - 0.42, ymax = y_prom + 0.42,
+           fill = "grey92", alpha = 0.6) +
+  geom_vline(xintercept = setdiff(x_scale$breaks, 0),
+             linetype = "dotted", linewidth = 0.4, color = "grey70") +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             linewidth = 0.7, color = "grey35") +
+  # two sub-rows per city, 0.36 apart -> a slightly taller cap than
+  # the 3-way education plots (0.24 apart) but shorter than the
+  # single-row city plots
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.14, linewidth = 0.75) +
+  geom_point(size = 2.9) +
+  scale_color_manual(values = pal_sex, labels = c("Men", "Women")) +
+  scale_x_continuous(
+    limits = x_scale$limits,
+    breaks = x_scale$breaks,
+    expand = c(0, 0)
+  ) +
+  scale_y_reverse(
+    breaks = seq_along(city_order),
+    labels = city_labels,
+    expand = expansion(mult = c(0.02, 0.03))
+  ) +
+  labs(x = expression(beta * " (95% CI)"), y = NULL, color = "Sex") +
+  tema_forest
+
+ggsave("Fig8B_supermarket_density_by_sex.png", p_health_sex,
+       width = export_w, height = export_h, units = "in",
+       dpi = export_dpi, bg = "white")
+
+#=========================================================
+# FOREST PLOT 3: Supermarket density x Educational level, by city
+# File: Fig8C_supermarket_density_by_education.png
+#=========================================================
+
+expo <- "DENS_HEALTH_LOG_ZC"
+b_EXPO <- expo
+
+b_EXPOxEDU <- c(
+  paste0("EDU_GROUPSecundaria o técnico:", expo),
+  paste0("EDU_GROUPProfesional o mayor:", expo)
+)
+if (!all(b_EXPOxEDU %in% names(mod$coef))) {
+  b_EXPOxEDU_alt <- c(
+    paste0(expo, ":EDU_GROUPSecundaria o técnico"),
+    paste0(expo, ":EDU_GROUPProfesional o mayor")
+  )
+  if (all(b_EXPOxEDU_alt %in% names(mod$coef))) b_EXPOxEDU <- b_EXPOxEDU_alt
+}
+stopifnot(b_EXPO %in% names(mod$coef))
+stopifnot(all(b_EXPOxEDU %in% names(mod$coef)))
+
+u_city <- as.data.frame(mod$ranefMat[[city_var]]) %>%
+  rownames_to_column("CITY_NAME")
+
+beta_EXPO     <- unname(mod$coef[b_EXPO])
+Vfix          <- mod$cov_mat
+var_beta_EXPO <- Vfix[b_EXPO, b_EXPO]
+var_u_EXPO    <- mod$varVC[[city_var]][expo, expo]
+
+beta_EXPOxEDU     <- setNames(as.numeric(mod$coef[b_EXPOxEDU]), b_EXPOxEDU)
+var_beta_EXPOxEDU <- sapply(b_EXPOxEDU, function(nm) Vfix[nm, nm])
+cov_EXPO_EXPOxEDU <- sapply(b_EXPOxEDU, function(nm) Vfix[b_EXPO, nm])
+
+df_city <- u_city %>%
+  transmute(CITY_NAME, u_EXPO = .data[[expo]]) %>%
+  crossing(EDU_GROUP = factor(edu_levels, levels = edu_levels)) %>%
+  mutate(
+    delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    var_delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ var_beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ var_beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    cov_d = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    slope = beta_EXPO + delta + u_EXPO,
+    se = sqrt(var_beta_EXPO + var_delta + 2 * cov_d + var_u_EXPO),
+    lwr = slope - 1.96 * se, upr = slope + 1.96 * se
+  )
+
+pop_df <- tibble(
+  CITY_NAME = "Global",
+  EDU_GROUP = factor(edu_levels, levels = edu_levels)
+) %>%
+  mutate(
+    delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    var_delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ var_beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ var_beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    cov_d = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    slope = beta_EXPO + delta,
+    se = sqrt(var_beta_EXPO + var_delta + 2 * cov_d),
+    lwr = slope - 1.96 * se, upr = slope + 1.96 * se
+  )
+
+plot_df <- bind_rows(df_city, pop_df) %>%
+  mutate(
+    CITY_NAME = factor(as.character(CITY_NAME), levels = city_order),
+    EDU_GROUP = factor(as.character(EDU_GROUP), levels = edu_levels),
+    city_y = as.numeric(CITY_NAME),
+    off = case_when(
+      EDU_GROUP == edu_levels[1] ~ +0.24,
+      EDU_GROUP == edu_levels[2] ~  0,
+      EDU_GROUP == edu_levels[3] ~ -0.24
+    ),
+    y = city_y + off
+  ) %>%
+  filter(!is.na(CITY_NAME))
+
+y_prom <- unique(plot_df$city_y[plot_df$CITY_NAME == "Global"])
+x_scale <- sym_x_scale(plot_df$lwr, plot_df$upr, target_breaks = 7)
+
+p_health_edu <- ggplot(plot_df, aes(x = slope, y = y, color = EDU_GROUP)) +
+  annotate("rect", xmin = -Inf, xmax = Inf,
+           ymin = y_prom - 0.42, ymax = y_prom + 0.42,
+           fill = "grey92", alpha = 0.6) +
+  geom_vline(xintercept = setdiff(x_scale$breaks, 0),
+             linetype = "dotted", linewidth = 0.4, color = "grey70") +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             linewidth = 0.7, color = "grey35") +
+  # three sub-rows per city, 0.24 apart -> shorter cap to avoid overlap
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.10, linewidth = 0.75) +
+  geom_point(size = 2.9) +
+  scale_color_manual(values = pal_edu, labels = edu_labels_en) +
+  scale_x_continuous(
+    limits = x_scale$limits,
+    breaks = x_scale$breaks,
+    expand = c(0, 0)
+  ) +
+  scale_y_reverse(
+    breaks = seq_along(city_order),
+    labels = city_labels,
+    expand = expansion(mult = c(0.02, 0.03))
+  ) +
+  labs(x = expression(beta * " (95% CI)"), y = NULL,
+       color = "Educational level") +
+  tema_forest
+
+ggsave("Fig8C_supermarket_density_by_education.png", p_health_edu,
+       width = export_w, height = export_h, units = "in",
+       dpi = export_dpi, bg = "white")
+
+#=========================================================
+# FOREST PLOT 4: Restaurant density (DENS_UNHEALTH_LOG_ZC), by city
+# File: Fig8D_restaurant_density_by_city.png
+#=========================================================
+
+expo <- "DENS_UNHEALTH_LOG_ZC"
+stopifnot(expo %in% names(mod$coef))
+
+beta_EXPO     <- unname(mod$coef[expo])
+Vfix          <- mod$cov_mat
+var_beta_EXPO <- Vfix[expo, expo]
+var_u_EXPO    <- mod$varVC[[city_var]][expo, expo]
+
+u_city <- as.data.frame(mod$ranefMat[[city_var]]) %>%
+  rownames_to_column("CITY_NAME")
+
+df_city <- u_city %>%
+  transmute(
+    CITY_NAME,
+    slope = beta_EXPO + .data[[expo]],
+    se    = sqrt(var_beta_EXPO + var_u_EXPO),
+    lwr   = slope - 1.96 * se,
+    upr   = slope + 1.96 * se
+  )
+
+pop_df <- tibble(
+  CITY_NAME = "Global",
+  slope = beta_EXPO,
+  se    = sqrt(var_beta_EXPO),
+  lwr   = beta_EXPO - 1.96 * sqrt(var_beta_EXPO),
+  upr   = beta_EXPO + 1.96 * sqrt(var_beta_EXPO)
+)
+
+plot_df <- bind_rows(df_city, pop_df) %>%
+  mutate(
+    CITY_NAME = factor(as.character(CITY_NAME), levels = city_order),
+    city_y = as.numeric(CITY_NAME),
+    is_pop = (as.character(CITY_NAME) == "Global")
+  ) %>%
+  filter(!is.na(CITY_NAME))
+
+y_prom <- unique(plot_df$city_y[plot_df$CITY_NAME == "Global"])
+x_scale <- sym_x_scale(plot_df$lwr, plot_df$upr, target_breaks = 7)
+
+p_unhealth_city <- ggplot(plot_df, aes(x = slope, y = city_y, color = CITY_NAME)) +
+  annotate("rect", xmin = -Inf, xmax = Inf,
+           ymin = y_prom - 0.42, ymax = y_prom + 0.42,
+           fill = "grey92", alpha = 0.6) +
+  geom_vline(xintercept = setdiff(x_scale$breaks, 0),
+             linetype = "dotted", linewidth = 0.4, color = "grey70") +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             linewidth = 0.7, color = "grey35") +
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.18, linewidth = 0.9) +
+  geom_point(aes(shape = is_pop), size = 3.0) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 18), guide = "none") +
+  scale_color_manual(values = pal_city, guide = "none") +
+  scale_x_continuous(
+    limits = x_scale$limits,
+    breaks = x_scale$breaks,
+    expand = c(0, 0)
+  ) +
+  scale_y_reverse(
+    breaks = seq_along(city_order),
+    labels = city_labels,
+    expand = expansion(mult = c(0.02, 0.03))
+  ) +
+  labs(x = expression(beta * " (95% CI)"), y = NULL) +
+  tema_forest
+
+ggsave("Fig8D_restaurant_density_by_city.png", p_unhealth_city,
+       width = export_w, height = export_h, units = "in",
+       dpi = export_dpi, bg = "white")
+
+#=========================================================
+# FOREST PLOT 5: Restaurant density x Educational level, by city
+# File: Fig8E_restaurant_density_by_education.png
+#=========================================================
+
+expo <- "DENS_UNHEALTH_LOG_ZC"
+b_EXPO <- expo
+
+b_EXPOxEDU <- c(
+  paste0("EDU_GROUPSecundaria o técnico:", expo),
+  paste0("EDU_GROUPProfesional o mayor:", expo)
+)
+if (!all(b_EXPOxEDU %in% names(mod$coef))) {
+  b_EXPOxEDU_alt <- c(
+    paste0(expo, ":EDU_GROUPSecundaria o técnico"),
+    paste0(expo, ":EDU_GROUPProfesional o mayor")
+  )
+  if (all(b_EXPOxEDU_alt %in% names(mod$coef))) b_EXPOxEDU <- b_EXPOxEDU_alt
+}
+stopifnot(b_EXPO %in% names(mod$coef))
+stopifnot(all(b_EXPOxEDU %in% names(mod$coef)))
+
+u_city <- as.data.frame(mod$ranefMat[[city_var]]) %>%
+  rownames_to_column("CITY_NAME")
+
+beta_EXPO     <- unname(mod$coef[b_EXPO])
+Vfix          <- mod$cov_mat
+var_beta_EXPO <- Vfix[b_EXPO, b_EXPO]
+var_u_EXPO    <- mod$varVC[[city_var]][expo, expo]
+
+beta_EXPOxEDU     <- setNames(as.numeric(mod$coef[b_EXPOxEDU]), b_EXPOxEDU)
+var_beta_EXPOxEDU <- sapply(b_EXPOxEDU, function(nm) Vfix[nm, nm])
+cov_EXPO_EXPOxEDU <- sapply(b_EXPOxEDU, function(nm) Vfix[b_EXPO, nm])
+
+df_city <- u_city %>%
+  transmute(CITY_NAME, u_EXPO = .data[[expo]]) %>%
+  crossing(EDU_GROUP = factor(edu_levels, levels = edu_levels)) %>%
+  mutate(
+    delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    var_delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ var_beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ var_beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    cov_d = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    slope = beta_EXPO + delta + u_EXPO,
+    se = sqrt(var_beta_EXPO + var_delta + 2 * cov_d + var_u_EXPO),
+    lwr = slope - 1.96 * se, upr = slope + 1.96 * se
+  )
+
+pop_df <- tibble(
+  CITY_NAME = "Global",
+  EDU_GROUP = factor(edu_levels, levels = edu_levels)
+) %>%
+  mutate(
+    delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    var_delta = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ var_beta_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ var_beta_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    cov_d = case_when(
+      EDU_GROUP == edu_levels[1] ~ 0,
+      EDU_GROUP == edu_levels[2] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[1]],
+      EDU_GROUP == edu_levels[3] ~ cov_EXPO_EXPOxEDU[b_EXPOxEDU[2]]
+    ),
+    slope = beta_EXPO + delta,
+    se = sqrt(var_beta_EXPO + var_delta + 2 * cov_d),
+    lwr = slope - 1.96 * se, upr = slope + 1.96 * se
+  )
+
+plot_df <- bind_rows(df_city, pop_df) %>%
+  mutate(
+    CITY_NAME = factor(as.character(CITY_NAME), levels = city_order),
+    EDU_GROUP = factor(as.character(EDU_GROUP), levels = edu_levels),
+    city_y = as.numeric(CITY_NAME),
+    off = case_when(
+      EDU_GROUP == edu_levels[1] ~ +0.24,
+      EDU_GROUP == edu_levels[2] ~  0,
+      EDU_GROUP == edu_levels[3] ~ -0.24
+    ),
+    y = city_y + off
+  ) %>%
+  filter(!is.na(CITY_NAME))
+
+y_prom <- unique(plot_df$city_y[plot_df$CITY_NAME == "Global"])
+x_scale <- sym_x_scale(plot_df$lwr, plot_df$upr, target_breaks = 7)
+
+p_unhealth_edu <- ggplot(plot_df, aes(x = slope, y = y, color = EDU_GROUP)) +
+  annotate("rect", xmin = -Inf, xmax = Inf,
+           ymin = y_prom - 0.42, ymax = y_prom + 0.42,
+           fill = "grey92", alpha = 0.6) +
+  geom_vline(xintercept = setdiff(x_scale$breaks, 0),
+             linetype = "dotted", linewidth = 0.4, color = "grey70") +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             linewidth = 0.7, color = "grey35") +
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.10, linewidth = 0.75) +
+  geom_point(size = 2.9) +
+  scale_color_manual(values = pal_edu, labels = edu_labels_en) +
+  scale_x_continuous(
+    limits = x_scale$limits,
+    breaks = x_scale$breaks,
+    expand = c(0, 0)
+  ) +
+  scale_y_reverse(
+    breaks = seq_along(city_order),
+    labels = city_labels,
+    expand = expansion(mult = c(0.02, 0.03))
+  ) +
+  labs(x = expression(beta * " (95% CI)"), y = NULL,
+       color = "Educational level") +
+  tema_forest
+
+ggsave("Fig8E_restaurant_density_by_education.png", p_unhealth_edu,
+       width = export_w, height = export_h, units = "in",
+       dpi = export_dpi, bg = "white")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
